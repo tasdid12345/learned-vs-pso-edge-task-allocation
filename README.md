@@ -1,28 +1,13 @@
-# LightGBM allocator vs fixed-budget PSO for edge micro-cluster task allocation
+# LightGBM allocator vs fixed-budget PSO (edge micro-cluster simulation)
 
-## Motivation
-The paper "Optimizing heterogeneous task allocation for edge compute micro clusters using PSO metaheuristic" (2022) uses particle swarm optimization to assign heterogeneous tasks to edge nodes. PSO needs many iterations at decision time. This experiment asks whether a learned allocator, trained offline on long-run PSO solutions, can match it at a much lower decision cost.
+Question: can a LightGBM allocator trained offline on long-run PSO solutions match or beat a fixed-budget PSO (20 particles x 30 iterations) when allocating tasks to edge nodes on a shifted workload (heavier tasks, slower nodes)?
 
-## Question
-Can a LightGBM allocator trained offline on long-run PSO solutions match or beat a fixed-budget PSO at allocating heterogeneous tasks to edge micro-cluster nodes, at much lower decision cost, on shifted workloads?
+Run `python analysis.py`. It writes `results.json` and `figures/relative_objective.png`.
 
-## Dataset
-A seeded numpy simulation, so nothing is downloaded. Each instance has about 5 heterogeneous nodes (speed, memory, power) and 20 tasks (compute, memory, data size, deadline). The objective is a weighted sum of makespan, energy and deadline-miss and memory-overflow penalties. Training instances come from a base distribution. The 100 test instances are shifted to heavier tasks and slower nodes. This is **not** the paper's dataset.
-
-## Baseline vs improved
-- **Baseline:** a standard discrete PSO (positions rounded to node indices, 20 particles, 30 iterations). The paper's exact settings are unknown. It is not claimed to be the paper's exact method.
-- **Improved:** a LightGBM classifier on task-node pair features. It imitates assignments from a long-budget PSO (50 particles, 200 iterations). A load-aware greedy pass decodes its output. Hyper-parameters and the greedy load weight are chosen by cross-validation on the training instances only.
-- Both use the same evaluation function and the same test instances. Randomized parts run with seeds 42, 43 and 44.
-- Main metric: mean objective relative to the long-run PSO reference (lower is better). Secondary metrics: deadline-miss rate and decision time per instance.
-
-## How to run
-```
-pip install -r requirements.txt
-python analysis.py
-```
-
-## Results
-Results are written to `results.json` (and a chart to `figures/`).
+Setup (seed 42, CPU only, seeded numpy simulation, 300 train / 100 shifted test instances):
+- Baseline: standard discrete PSO, 20 particles, 30 iterations (unchanged).
+- Improved: LightGBM pairwise task-node classifier trained on long-PSO assignments (config and greedy load weight chosen by 3-fold CV on training instances only). At decision time, the probabilities are decoded greedily with a few load weights, the best candidate by objective is kept, and it is refined with steepest-descent single-task moves. The total number of objective evaluations is capped below the baseline PSO's (620), so the improved method does not get more search budget than the baseline.
+- Metric: mean objective relative to a long-run PSO reference (lower is better). The test set is used only once, for final evaluation.
 
 ## Reference
 

@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 SEEDS = [42, 43, 44]
 T = 20                      # tasks per instance
 N_TRAIN, N_TEST = 300, 100  # instances (test is 25% of all)
+BASE_P, BASE_IT = 20, 30
+BASE_EVALS = BASE_P * (BASE_IT + 1)   # objective evaluations used by baseline PSO
 rng0 = np.random.default_rng(42)
 
 
@@ -84,6 +86,31 @@ def decode(inst, P, lam):
     return A
 
 
+def allocate(inst, P, lams, max_evals):
+    """Model-based allocator: decode model probabilities with a few load weights, keep the best by
+    the objective, then steepest-descent single-task moves. Total objective evaluations are capped
+    BELOW the number the baseline PSO uses (max_evals)."""
+    N = inst["N"]
+    cands = np.array([decode(inst, P, l) for l in lams])
+    v, _ = evaluate(inst, cands); used = len(cands)
+    A = cands[v.argmin()].copy(); best = v.min()
+    ti = np.repeat(np.arange(T), N)
+    nj = np.tile(np.arange(N), T)
+    while True:
+        keep = nj != A[ti]
+        ii, jj = ti[keep], nj[keep]
+        if used + len(ii) > max_evals:
+            break
+        nb = np.repeat(A[None], len(ii), 0); nb[np.arange(len(ii)), ii] = jj
+        nv, _ = evaluate(inst, nb); used += len(ii)
+        k = nv.argmin()
+        if nv[k] < best - 1e-9:
+            best = nv[k]; A = nb[k].copy()
+        else:
+            break
+    return A, used
+
+
 def lgb_model(cfg, seed):
     return lgb.LGBMClassifier(learning_rate=0.05, subsample=0.8, subsample_freq=1, colsample_bytree=0.8,
                               random_state=seed, n_jobs=1, verbose=-1, **cfg)
@@ -115,7 +142,8 @@ _, cfg, oof = best
 lam_scores = {lam: np.mean([evaluate(x, decode(x, oof[i], lam)[None])[0][0] for i, x in enumerate(tr_inst)])
               for lam in [0, 0.5, 1, 2, 4, 8]}
 lam = min(lam_scores, key=lam_scores.get)
-print(f"  chosen cfg {cfg}, lambda {lam}")
+lams = sorted({float(lam), 1.0, 4.0})
+print(f"  chosen cfg {cfg}, lambda {lam}, decode lambdas {lams}")
 models = [lgb_model(cfg, s).fit(*stack(range(N_TRAIN))) for s in SEEDS]
 offline_s = time.perf_counter() - t0
 print(f"Offline labelling+training took {offline_s:.1f}s")
@@ -124,21 +152,23 @@ print(f"Offline labelling+training took {offline_s:.1f}s")
 print("Evaluating on shifted test set...")
 ref = np.array([evaluate(x, pso(x, 50, 200, 42 + 1000 + i)[None])[0][0] for i, x in enumerate(te_inst)])
 ref_miss = np.mean([evaluate(x, pso(x, 50, 200, 42 + 1000 + i)[None])[1][0] for i, x in enumerate(te_inst)]) / T
+offs = np.concatenate([[0], np.cumsum([T * x["N"] for x in te_inst])])
 res = {"base": [], "imp": []}
+evals_used = []
 for s, mdl in zip(SEEDS, models):
     # baseline: fixed-budget PSO (20 particles, 30 iterations)
     t1 = time.perf_counter()
-    As = [pso(x, 20, 30, s * 1000 + i) for i, x in enumerate(te_inst)]
+    As = [pso(x, BASE_P, BASE_IT, s * 1000 + i) for i, x in enumerate(te_inst)]
     tb = (time.perf_counter() - t1) / N_TEST
     ev = [evaluate(x, A[None]) for x, A in zip(te_inst, As)]
     res["base"].append((np.mean(np.array([e[0][0] for e in ev]) / ref), np.mean([e[1][0] for e in ev]) / T, tb * 1000,
                         np.mean([e[0][0] for e in ev])))
-    # improved: features + LightGBM + greedy decode (timed end to end)
+    # improved: features + LightGBM + multi-lambda greedy decode + capped local refinement (timed end to end)
     t1 = time.perf_counter()
     Xt = np.vstack([features(x) for x in te_inst]); pr = mdl.predict_proba(Xt)[:, 1]
-    As = [decode(x, pr[i * T * x["N"]:(i + 1) * T * x["N"]].reshape(T, -1) if False else
-                 pr[sum(T * y["N"] for y in te_inst[:i]):sum(T * y["N"] for y in te_inst[:i + 1])].reshape(T, -1), lam)
-          for i, x in enumerate(te_inst)]
+    outs = [allocate(x, pr[offs[i]:offs[i + 1]].reshape(T, -1), lams, BASE_EVALS - 1)
+            for i, x in enumerate(te_inst)]
+    As = [o[0] for o in outs]; evals_used.append(np.mean([o[1] for o in outs]))
     ti = (time.perf_counter() - t1) / N_TEST
     ev = [evaluate(x, A[None]) for x, A in zip(te_inst, As)]
     res["imp"].append((np.mean(np.array([e[0][0] for e in ev]) / ref), np.mean([e[1][0] for e in ev]) / T, ti * 1000,
@@ -155,7 +185,9 @@ metrics = {"baseline_score": B[:, 0].mean(), "improved_score": I[:, 0].mean(),
            "decision_speedup_x": B[:, 2].mean() / I[:, 2].mean(),
            "baseline_mean_objective": B[:, 3].mean(), "improved_mean_objective": I[:, 3].mean(),
            "reference_mean_objective": ref.mean(), "reference_miss_rate": ref_miss,
-           "offline_label_and_train_seconds": offline_s, "greedy_lambda": float(lam)}
+           "offline_label_and_train_seconds": offline_s, "greedy_lambda": float(lam),
+           "baseline_objective_evals_per_instance": float(BASE_EVALS),
+           "improved_objective_evals_per_instance": float(np.mean(evals_used))}
 metrics = {k: float(v) for k, v in metrics.items()}
 if not all(np.isfinite(v) for v in metrics.values()):
     sys.exit("non-finite metrics")
@@ -167,15 +199,15 @@ plt.axhline(1.0, color="k", ls="--", lw=1); plt.ylabel("Mean objective / long-PS
 plt.tight_layout(); plt.savefig("figures/relative_objective.png", dpi=120)
 
 out = {"question": "Can a LightGBM allocator trained offline on long-run PSO solutions match or beat a fixed-budget PSO at allocating heterogeneous tasks to edge micro-cluster nodes, at much lower decision cost, on shifted workloads?",
-       "method": "Seeded numpy simulation; baseline discrete PSO (20 particles, 30 iters) vs LightGBM pairwise classifier imitating long PSO (50 particles, 200 iters) with load-aware greedy decoding; evaluated on a shifted (heavier tasks, slower nodes) test set.",
+       "method": "Seeded numpy simulation; baseline discrete PSO (20 particles, 30 iters) vs LightGBM pairwise classifier imitating long PSO (50 particles, 200 iters) with load-aware greedy decoding (several load weights, best by objective) followed by a capped single-task-move local refinement; evaluated on a shifted (heavier tasks, slower nodes) test set.",
        "dataset": {"name": "Seeded numpy edge micro-cluster allocation simulation (instances)", "source_url": "N/A (simulated)",
                    "n_rows": N_TRAIN + N_TEST, "n_train": N_TRAIN, "n_test": N_TEST, "same_as_paper": False,
                    "baseline_is_papers_method": False},
        "metric_name": "Mean objective relative to long-run PSO reference (lower is better)", "higher_is_better": False,
        "baseline": "Standard discrete PSO, 20 particles, 30 iterations, w=0.7, c1=c2=1.5 (paper's settings unknown); seeds 42-44.",
-       "improved": "LightGBM classifier on scale-free task-node features trained on long-run PSO assignments, decoded by a load-aware greedy pass; seeds 42-44.",
+       "improved": "LightGBM classifier on scale-free task-node features trained on long-run PSO assignments, decoded by load-aware greedy passes and refined by a local search whose total objective evaluations are capped below the baseline PSO's; seeds 42-44.",
        "metrics": metrics,
-       "notes": "Simulation only; objective weights and shift are my own choices. Rows are instances (each has 20 tasks x ~5 nodes). The reference is a single long PSO run, not a proven optimum, so ratios below 1 are possible. LightGBM time includes feature building, prediction and decoding but not offline training/labelling. Hyper-parameters and greedy load weight were chosen by CV on training instances only; the shifted test set was used once. PSO miss rate is the fraction of tasks missing deadlines."}
+       "notes": "Simulation only; objective weights and shift are my own choices. Rows are instances (each has 20 tasks x ~5 nodes). The reference is a single long PSO run, not a proven optimum, so ratios below 1 are possible. The improved method's total timing (features, prediction, decoding, local refinement) is included in decision time but not offline training/labelling. The local refinement uses the same objective function as the PSO, with fewer objective evaluations per instance than the baseline (see metrics). Hyper-parameters and greedy load weight were chosen by CV on training instances only; the shifted test set was used once. PSO miss rate is the fraction of tasks missing deadlines."}
 with open("results.json", "w", encoding="utf-8") as f:
     json.dump(out, f, indent=2)
 print(json.dumps(metrics, indent=2))
