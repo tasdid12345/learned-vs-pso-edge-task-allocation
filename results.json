@@ -1,0 +1,40 @@
+{
+  "question": "Can a LightGBM allocator trained offline on long-run PSO solutions match or beat a fixed-budget PSO at allocating heterogeneous tasks to edge micro-cluster nodes, at much lower decision cost, on shifted workloads?",
+  "method": "Seeded numpy simulation; baseline discrete PSO (20 particles, 30 iters) vs LightGBM pairwise classifier imitating long PSO (50 particles, 200 iters) with load-aware greedy decoding (several load weights, best by objective) followed by a capped single-task-move local refinement; evaluated on a shifted (heavier tasks, slower nodes) test set.",
+  "dataset": {
+    "name": "Seeded numpy edge micro-cluster allocation simulation (instances)",
+    "source_url": "N/A (simulated)",
+    "n_rows": 400,
+    "n_train": 300,
+    "n_test": 100,
+    "same_as_paper": false,
+    "baseline_is_papers_method": false
+  },
+  "metric_name": "Mean objective relative to long-run PSO reference (lower is better)",
+  "higher_is_better": false,
+  "baseline": "Standard discrete PSO, 20 particles, 30 iterations, w=0.7, c1=c2=1.5 (paper's settings unknown); seeds 42-44.",
+  "improved": "LightGBM classifier on scale-free task-node features trained on long-run PSO assignments, decoded by load-aware greedy passes and refined by a local search whose total objective evaluations are capped below the baseline PSO's; seeds 42-44.",
+  "metrics": {
+    "baseline_score": 1.0674611404058731,
+    "improved_score": 0.9975897634322543,
+    "baseline_score_std": 0.007482977598320125,
+    "improved_score_std": 0.0005543115480053101,
+    "improvement": 0.06987137697361889,
+    "baseline_miss_rate": 0.4000000000000001,
+    "improved_miss_rate": 0.34783333333333327,
+    "baseline_miss_rate_std": 0.00990790929846791,
+    "improved_miss_rate_std": 0.0014337208778404606,
+    "baseline_decision_ms": 3.8610867666666593,
+    "improved_decision_ms": 2.380993806666775,
+    "decision_speedup_x": 1.6216282276147167,
+    "baseline_mean_objective": 63.12105044752485,
+    "improved_mean_objective": 59.332240228604206,
+    "reference_mean_objective": 59.475790287113774,
+    "reference_miss_rate": 0.353,
+    "offline_label_and_train_seconds": 16.358390974000002,
+    "greedy_lambda": 2.0,
+    "baseline_objective_evals_per_instance": 620.0,
+    "improved_objective_evals_per_instance": 288.3333333333333
+  },
+  "notes": "Simulation only; objective weights and shift are my own choices. Rows are instances (each has 20 tasks x ~5 nodes). The reference is a single long PSO run, not a proven optimum, so ratios below 1 are possible. The improved method's total timing (features, prediction, decoding, local refinement) is included in decision time but not offline training/labelling. The local refinement uses the same objective function as the PSO, with fewer objective evaluations per instance than the baseline (see metrics). Hyper-parameters and greedy load weight were chosen by CV on training instances only; the shifted test set was used once. PSO miss rate is the fraction of tasks missing deadlines."
+}
